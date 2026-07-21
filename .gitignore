@@ -1,0 +1,7 @@
+# n8n export / local artifacts
+*.n8n-backup
+.env
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

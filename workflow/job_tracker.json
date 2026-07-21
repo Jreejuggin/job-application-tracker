@@ -1,0 +1,567 @@
+{
+  "name": "Job Application Email Tracker",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {},
+        "options": {}
+      },
+      "id": "cc3a067b-a773-4780-9c07-9b1a9e313e03",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -880,
+        80
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function getByPath(obj, path) {\n  try {\n    return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);\n  } catch (e) {\n    return undefined;\n  }\n}\n\nfunction firstNonEmpty(obj, paths) {\n  for (const p of paths) {\n    const v = getByPath(obj, p);\n    if (v !== undefined && v !== null && String(v).trim() !== '') {\n      return typeof v === 'string' ? v : String(v);\n    }\n  }\n  return '';\n}\n\nfunction decodeBase64Url(data) {\n  if (!data) return '';\n  try {\n    const normalized = String(data).replace(/-/g, '+').replace(/_/g, '/');\n    return Buffer.from(normalized, 'base64').toString('utf-8');\n  } catch (e) {\n    return '';\n  }\n}\n\nfunction findMimePart(payload, mimeType) {\n  let result = '';\n  if (!payload) return result;\n  if (payload.mimeType === mimeType && payload.body && payload.body.data) {\n    result += decodeBase64Url(payload.body.data);\n  }\n  if (Array.isArray(payload.parts)) {\n    for (const part of payload.parts) {\n      result += findMimePart(part, mimeType);\n    }\n  }\n  return result;\n}\n\nfunction getHeaderFromArray(headers, name) {\n  if (!Array.isArray(headers)) return '';\n  const target = name.toLowerCase();\n  const match = headers.find(h => h && typeof h.name === 'string' && h.name.toLowerCase() === target);\n  return match ? (match.value || '') : '';\n}\n\nfunction getHeaderFromObject(headersObj, name) {\n  if (!headersObj || typeof headersObj !== 'object') return '';\n  const key = Object.keys(headersObj).find(k => k.toLowerCase() === name.toLowerCase());\n  return key ? (headersObj[key] || '') : '';\n}\n\nconst results = [];\n\nfor (const item of $input.all()) {\n  const message = item.json || {};\n  const payload = message.payload || {};\n\n  const headerArray = payload.headers || message.headers || [];\n  const headerObject = (!Array.isArray(headerArray) && typeof headerArray === 'object') ? headerArray : null;\n\n  function getHeader(name) {\n    let v = '';\n    if (Array.isArray(headerArray)) v = getHeaderFromArray(headerArray, name);\n    if (!v && headerObject) v = getHeaderFromObject(headerObject, name);\n    return v;\n  }\n\n  const subject = firstNonEmpty(message, ['Subject', 'subject']) || getHeader('Subject');\n  const from = firstNonEmpty(message, ['From', 'from', 'sender', 'Sender']) || getHeader('From');\n  const to = firstNonEmpty(message, ['To', 'to']) || getHeader('To');\n\n  let date = firstNonEmpty(message, ['Date', 'date']) || getHeader('Date');\n  if (!date && message.internalDate) {\n    const ms = Number(message.internalDate);\n    if (!isNaN(ms)) date = new Date(ms).toUTCString();\n  }\n\n  const snippet = firstNonEmpty(message, ['snippet', 'Snippet']);\n\n  let bodyText = firstNonEmpty(message, ['textPlain', 'text', 'bodyText', 'body.plain', 'body.text']);\n  let bodyHtml = firstNonEmpty(message, ['textHtml', 'html', 'bodyHtml', 'body.html']);\n\n  if (!bodyText) bodyText = findMimePart(payload, 'text/plain');\n  if (!bodyHtml) bodyHtml = findMimePart(payload, 'text/html');\n\n  if (!bodyText && !bodyHtml && payload.body && payload.body.data) {\n    const decoded = decodeBase64Url(payload.body.data);\n    if (payload.mimeType === 'text/html') {\n      bodyHtml = decoded;\n    } else {\n      bodyText = decoded;\n    }\n  }\n\n  if (!bodyText && !bodyHtml && message.raw) {\n    const rawDecoded = decodeBase64Url(message.raw);\n    const splitParts = rawDecoded.split(/\\r?\\n\\r?\\n/);\n    bodyText = splitParts.slice(1).join('\\n\\n') || rawDecoded;\n  }\n\n  results.push({\n    json: {\n      messageId: message.id || message.messageId || '',\n      threadId: message.threadId || '',\n      subject: subject || '',\n      from: from || '',\n      to: to || '',\n      date: date || '',\n      snippet: snippet || '',\n      bodyText: bodyText || '',\n      bodyHtml: bodyHtml || ''\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "30cac31a-db21-4fc1-b159-4350af0d2017",
+      "name": "Extract Email Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// IANA timezone used to format \"Date Applied\". Gmail header dates and the fallback\n// \"today\" value are both converted into this timezone before formatting, so the date\n// written to the sheet matches your local calendar day instead of UTC (n8n/Gmail\n// timestamps are UTC internally, which can roll a late-evening email into \"tomorrow\"\n// if you just take the UTC date). Change this if you're not in Toronto.\nconst APP_TIMEZONE = 'America/Toronto';\n\nfunction toLocalDateString(date, timeZone) {\n  try {\n    const fmt = new Intl.DateTimeFormat('en-CA', {\n      timeZone: timeZone,\n      year: 'numeric',\n      month: '2-digit',\n      day: '2-digit'\n    });\n    return fmt.format(date); // en-CA locale formats as YYYY-MM-DD\n  } catch (e) {\n    return date.toISOString().split('T')[0];\n  }\n}\n\nconst CONFIRMATION_PHRASES = [\n  /thank you for applying/i,\n  /thanks for applying/i,\n  /thank you for taking the time to apply/i,\n  /we.?ve received your application/i,\n  /we have received your application/i,\n  /application received/i,\n  /your application has been submitted/i,\n  /application submitted successfully/i,\n  /thanks for your interest/i,\n  /thank you for your interest/i,\n  /candidate portal/i,\n  /application confirmation/i,\n  /successfully applied/i,\n  /you.?ve applied/i,\n  /your application to/i,\n  /your application was sent/i,\n  /we appreciate your interest/i,\n  /application was sent/i,\n  /application has been received/i,\n  /reviewing your candidate profile/i,\n  /currently reviewing your (?:application|candidate profile)/i\n];\n\n// Job alert / recommendation digests (Glassdoor \"Job alert: X\", Indeed \"N new ... jobs\",\n// \"X and N more jobs in <City> for you\") share enough vocabulary (\"apply\", \"Indeed\", etc.)\n// with real confirmations that the fallback classifier below can mistake them for one.\n// Any of these patterns matching forces isJobApplication back to false, regardless of\n// what else matched.\nconst JOB_ALERT_PATTERNS = [\n  /\\bjob alerts?\\b/i,\n  /\\d+\\s+more jobs?\\b/i,\n  /\\byour job listings? for\\b/i,\n  /\\bsee more jobs\\b/i,\n  /\\bnew .{0,60}opportunit(?:y|ies) in\\b/i,\n  /\\bcreate job alerts? for related roles\\b/i\n];\n\nconst KNOWN_SOURCES = [\n  { name: 'LinkedIn', pattern: /linkedin\\.com|linkedin/i },\n  { name: 'Indeed', pattern: /indeed\\.com|indeed/i },\n  { name: 'Greenhouse', pattern: /greenhouse\\.io|greenhouse/i },\n  { name: 'Lever', pattern: /lever\\.co|lever/i },\n  { name: 'Workday', pattern: /myworkday\\.com|workday/i },\n  { name: 'Ashby', pattern: /ashbyhq\\.com|ashby/i },\n  { name: 'SmartRecruiters', pattern: /smartrecruiters\\.com|smartrecruiters/i },\n  { name: 'BambooHR', pattern: /bamboohr\\.com|bamboohr/i },\n  { name: 'Jobvite', pattern: /jobvite\\.com|jobvite/i },\n  { name: 'iCIMS', pattern: /icims\\.com|icims/i }\n];\n\n// Sender/domain keywords that should never be mistaken for a company name when we fall\n// back to the \"From\" header (ATS platforms + LinkedIn/Indeed all send from their own domains).\nconst NON_COMPANY_SENDER_KEYWORDS = /linkedin|indeed|greenhouse|lever|workday|ashby|smartrecruiters|bamboohr|jobvite|icims|no-?reply|noreply|talent(?:acquisition)?@|careers@|jobs@/i;\n\nconst JOB_TYPE_RULES = [\n  { category: 'Internship', patterns: [/\\bintern(ship)?\\b/i] },\n  { category: 'QA', patterns: [/\\bqa\\b/i, /quality assurance/i, /\\btest(er|ing)?\\b/i, /\\bsdet\\b/i] },\n  { category: 'Data Analyst', patterns: [/data analyst/i, /data scien/i, /business intelligence/i, /\\bbi analyst\\b/i, /\\banalytics\\b/i] },\n  { category: 'IT Support', patterns: [/it support/i, /help ?desk/i, /technical support/i, /desktop support/i, /systems? administrator/i, /support technician/i] },\n  { category: 'Web Developer', patterns: [/web develop/i, /front.?end/i, /back.?end/i, /full.?stack/i, /ui developer/i, /website develop/i] },\n  { category: 'Software Developer', patterns: [/software (developer|engineer)/i, /\\bsde\\b/i, /programmer/i, /application developer/i, /backend engineer/i, /\\bai developer\\b/i, /developer/i, /engineer/i] }\n];\n\nfunction categorizeJobType(jobTitle, fallbackText) {\n  const titleText = (jobTitle || '').toLowerCase();\n  const wideText = ((jobTitle || '') + ' ' + (fallbackText || '')).toLowerCase();\n\n  for (const rule of JOB_TYPE_RULES) {\n    if (rule.patterns.some(p => p.test(titleText))) return rule.category;\n  }\n  for (const rule of JOB_TYPE_RULES) {\n    if (rule.patterns.some(p => p.test(wideText))) return rule.category;\n  }\n  return 'Other';\n}\n\nfunction stripHtml(html) {\n  if (!html) return '';\n  return html\n    .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<br\\s*\\/?>/gi, '\\n')\n    .replace(/<\\/p>/gi, '\\n')\n    .replace(/<\\/tr>/gi, '\\n')\n    .replace(/<\\/div>/gi, '\\n')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/g, ' ')\n    .replace(/&amp;/g, '&')\n    .replace(/&#39;/g, \"'\")\n    .replace(/&quot;/g, '\"')\n    .replace(/[ \\t]+/g, ' ')\n    .replace(/\\n{3,}/g, '\\n\\n')\n    .trim();\n}\n\nfunction tryMatch(text, patterns) {\n  for (const p of patterns) {\n    const m = text.match(p);\n    if (m && m[1]) return m[1].trim();\n  }\n  return '';\n}\n\n// Handles cases where job title AND company appear together in one sentence, in either\n// order (\"applying for X at Y\" / \"application sent to Y for X\"). Tried before the\n// single-field fallbacks further down since it's far more reliable when it matches.\n// TITLE_CHARS allows parentheses so titles like \"AI Developer (Fixed term contract)\"\n// are captured whole instead of getting cut off at the \"(\".\nfunction extractTitleCompanyPair(text) {\n  if (!text) return null;\n  const TITLE_CHARS = \"[\\\\w&.,\\\\/\\\\-\\\\+\\\\(\\\\) ]\";\n  const rules = [\n    { re: new RegExp(\"\\\\b(?:applying for|applied for|application for|apply for|application to)\\\\s+(?:the\\\\s+)?(\" + TITLE_CHARS + \"{1,90}?)\\\\s+(?:role|position|job)?\\\\s*(?:at|with|@)\\\\s+([A-Z][\\\\w&.,'\\\\-\\\\& ]{1,60}?)(?:[.,;:\\\\n!]|$)\", \"i\"), titleGroup: 1, companyGroup: 2 },\n    { re: new RegExp(\"\\\\b(?:for the position of|for the role of)\\\\s+(\" + TITLE_CHARS + \"{1,90}?)\\\\s+(?:at|with|@)\\\\s+([A-Z][\\\\w&.,'\\\\-\\\\& ]{1,60}?)(?:[.,;:\\\\n!]|$)\", \"i\"), titleGroup: 1, companyGroup: 2 },\n    { re: new RegExp(\"application (?:was )?sent to\\\\s+([A-Z][\\\\w&.,'\\\\-\\\\& ]{1,60}?)\\\\s+for\\\\s+(?:the\\\\s+)?(\" + TITLE_CHARS + \"{1,90}?)(?:[.,;:\\\\n!]|$)\", \"i\"), titleGroup: 2, companyGroup: 1 },\n    { re: new RegExp(\"you (?:have )?applied for\\\\s+(\" + TITLE_CHARS + \"{1,90}?)\\\\s+at\\\\s+([A-Z][\\\\w&.,'\\\\-\\\\& ]{1,60}?)(?:[.,;:\\\\n!]|$)\", \"i\"), titleGroup: 1, companyGroup: 2 },\n    // LinkedIn Easy Apply block layout: \"Your application was sent to <Company>\" sits on\n    // its own line, and the job title is the very next line (no \"at Company\" sentence at\n    // all) - e.g. \"Your application was sent to Helic & Co\\n\\nJunior Software Developer\\nHelic & Co\\n...\"\n    { re: new RegExp(\"application (?:was )?sent to\\\\s+([A-Z][\\\\w&.,'\\\\-\\\\& ]{1,60})\\\\s*\\\\n+\\\\s*(\" + TITLE_CHARS + \"{1,90})\\\\s*\\\\n\", \"i\"), titleGroup: 2, companyGroup: 1 }\n  ];\n  for (const rule of rules) {\n    const m = text.match(rule.re);\n    if (m && m[rule.titleGroup] && m[rule.companyGroup]) {\n      return {\n        jobTitle: m[rule.titleGroup].trim().replace(/[.,]$/, ''),\n        company: m[rule.companyGroup].trim().replace(/[.,]$/, '')\n      };\n    }\n  }\n  return null;\n}\n\n// Many ATS confirmation emails never state \"at <Company>\" anywhere - the only place the\n// company appears is the email signature, e.g. \"Purolator Talent Acquisition Team\" or\n// \"The Acme Recruiting Team\". Used only as a fallback once sentence-level extraction fails.\nfunction extractCompanyFromSignature(text) {\n  if (!text) return '';\n  const patterns = [\n    /\\b([A-Z][\\w&.,'\\- ]{1,60}?)\\s+(?:Talent Acquisition|Recruiting|Recruitment|HR|Careers|Hiring)\\s+Team\\b/,\n    /(?:Best regards|Sincerely|Regards|Warm regards|Kind regards|Thank you),?\\s+(?:The\\s+)?([A-Z][\\w&.,'\\- ]{1,60}?)\\s+(?:Team|Talent Acquisition Team|Recruiting Team|HR Team|Careers Team)\\b/i,\n    /(?:^|\\n)\\s*(?:The\\s+)?([A-Z][\\w&.,'\\- ]{2,60}?)\\s+Team\\s*(?:\\n|$)/m\n  ];\n  return tryMatch(text, patterns);\n}\n\n// LinkedIn (\"Easy Apply\") confirmation emails rarely put job title and company in one\n// sentence - they're often split across a subject line and a separate body line. These\n// patterns are tried specifically when the source is LinkedIn (or as a general fallback)\n// once nothing else has matched.\nfunction extractLinkedInFields(subject, body) {\n  const company = tryMatch(subject, [\n    /application was sent to\\s+([A-Z][\\w&.,'\\-\\& ]{1,60})/i,\n    /your application to\\s+([A-Z][\\w&.,'\\-\\& ]{1,60})/i\n  ]) || tryMatch(body, [\n    /application was sent to\\s+([A-Z][\\w&.,'\\-\\& ]{1,60})/i,\n    /applied to\\s+([A-Z][\\w&.,'\\-\\& ]{1,60})/i\n  ]);\n\n  const jobTitle = tryMatch(subject, [\n    /for the\\s+([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90}?)\\s+(?:role|position)/i\n  ]) || tryMatch(body, [\n    /you applied for\\s+([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90}?)(?:\\s+at\\b|[.,\\n]|$)/i,\n    /application for\\s+(?:the\\s+)?([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90}?)(?:\\s+(?:role|position))?\\s*(?:has been|was)/i\n  ]);\n\n  return { company: company || '', jobTitle: jobTitle || '' };\n}\n\n// Indeed confirmation emails (\"Indeed Application: <Title>\") put the job title in the\n// subject line reliably, and the company name appears in a \"The following items were\n// sent to <Company>. Good luck!\" sentence in the body - not in an \"at <Company>\" sentence,\n// so the generic combined extractor above never catches it.\nfunction extractIndeedFields(subject, body) {\n  let jobTitle = tryMatch(subject, [\n    /^indeed application:\\s*(.+)$/i\n  ]);\n  if (!jobTitle) {\n    jobTitle = tryMatch(body, [\n      /application submitted\\s*\\n+\\s*([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90})/i\n    ]);\n  }\n\n  const company = tryMatch(body, [\n    /(?:were sent to|was sent to|items were sent to)\\s+([A-Z][\\w&.,'\\-\\& ]{1,60}?)\\.\\s*Good luck/i,\n    /application (?:was |has been )?submitted to\\s+([A-Z][\\w&.,'\\-\\& ]{1,60})/i\n  ]);\n\n  return { jobTitle: jobTitle || '', company: company || '' };\n}\n\n// Workday-hosted career sites (used by many large companies, e.g. Roche) rarely put the\n// company name in a sentence at all - the confirmation body just says \"Thank you for\n// applying to the <Title> position\" and signs off with a department name like \"People and\n// Culture\" rather than the company. The one reliable place the company shows up is the\n// Workday application URL itself, e.g. https://roche.wd3.myworkdayjobs.com/... or a\n// careers.<company>.com link in the footer.\nfunction extractWorkdayFields(text) {\n  let company = '';\n  const wdMatch = text.match(/https?:\\/\\/([a-z0-9][a-z0-9\\-]*)\\.wd\\d+\\.myworkday(?:jobs)?\\.com/i);\n  if (wdMatch && wdMatch[1]) {\n    company = wdMatch[1];\n  }\n  if (!company) {\n    const careersMatch = text.match(/careers\\.([a-z0-9\\-]+)\\.(?:com|io|co|net|org)/i);\n    if (careersMatch && careersMatch[1]) company = careersMatch[1];\n  }\n  if (company) {\n    company = company\n      .split(/[-_]/)\n      .filter(Boolean)\n      .map(w => w.charAt(0).toUpperCase() + w.slice(1))\n      .join(' ');\n  }\n  return { company: company || '' };\n}\n\nconst results = [];\n\nfor (const item of $input.all()) {\n  const d = item.json;\n  const subject = d.subject || '';\n  const from = d.from || '';\n  const bodyTextRaw = d.bodyText || '';\n  const bodyHtmlText = stripHtml(d.bodyHtml || '');\n  const combinedBody = (bodyTextRaw + '\\n' + bodyHtmlText).trim();\n  const searchable = subject + '\\n' + from + '\\n' + combinedBody;\n\n  // Check the sender address and subject first (authoritative, low false-positive risk).\n  // Only fall back to scanning the full body if neither matches - some ATS confirmation\n  // emails (e.g. Roche's Workday email) link to the company's LinkedIn/Instagram/Facebook\n  // pages in the footer, which would otherwise cause a false \"LinkedIn\" source match.\n  let source = '';\n  for (const s of KNOWN_SOURCES) {\n    if (s.pattern.test(from) || s.pattern.test(subject)) { source = s.name; break; }\n  }\n  if (!source) {\n    for (const s of KNOWN_SOURCES) {\n      if (s.pattern.test(combinedBody)) { source = s.name; break; }\n    }\n  }\n\n  const isConfirmation = CONFIRMATION_PHRASES.some(p => p.test(searchable));\n  const isJobAlertDigest = JOB_ALERT_PATTERNS.some(p => p.test(subject) || p.test(combinedBody));\n  const isJobApplication = !isJobAlertDigest && (isConfirmation || (!!source && /appli/i.test(searchable)));\n\n  // Priority 1: combined \"title at company\" pattern (checked in subject, then body)\n  const pair = extractTitleCompanyPair(subject) || extractTitleCompanyPair(combinedBody);\n\n  let company = pair ? pair.company : '';\n  let jobTitle = pair ? pair.jobTitle : '';\n\n  // Priority 2: LinkedIn-specific phrasing (only helps when source is LinkedIn, but cheap\n  // to try regardless since the patterns are fairly specific)\n  if (!company || !jobTitle) {\n    const li = extractLinkedInFields(subject, combinedBody);\n    if (!company && li.company) company = li.company;\n    if (!jobTitle && li.jobTitle) jobTitle = li.jobTitle;\n  }\n\n  // Priority 2b: Indeed-specific phrasing (subject \"Indeed Application: <Title>\" plus the\n  // \"sent to <Company>. Good luck!\" body sentence)\n  if (!company || !jobTitle) {\n    const idx = extractIndeedFields(subject, combinedBody);\n    if (!company && idx.company) company = idx.company;\n    if (!jobTitle && idx.jobTitle) jobTitle = idx.jobTitle;\n  }\n\n  // Priority 2c: Workday-specific fallback (company pulled from the application URL)\n  if (!company) {\n    const wd = extractWorkdayFields(searchable);\n    if (wd.company) company = wd.company;\n  }\n\n  // Priority 3: individual fallback patterns for company\n  if (!company) {\n    company = tryMatch(subject, [\n      /your application to\\s+([A-Z][\\w&.,'\\- ]{1,60})/i,\n      /application to\\s+([A-Z][\\w&.,'\\- ]{1,60})/i,\n      /applying to\\s+([A-Z][\\w&.,'\\- ]{1,60})/i,\n      /at\\s+([A-Z][\\w&.,'\\- ]{1,60})$/i\n    ]);\n  }\n  if (!company) {\n    company = tryMatch(combinedBody, [\n      /your application (?:to|for|at)\\s+([A-Z][\\w&.,'\\- ]{1,60})/i,\n      /applied to\\s+([A-Z][\\w&.,'\\- ]{1,60})/i,\n      /application (?:to|with)\\s+([A-Z][\\w&.,'\\- ]{1,60})/i,\n      /thank you for your interest in\\s+([A-Z][\\w&.,'\\- ]{1,60})/i,\n      /company:\\s*([A-Z][\\w&.,'\\- ]{1,60})/i,\n      /\\bat\\s+([A-Z][\\w&.,'\\- ]{1,60}?)(?:[.,;:\\n!]|$)/\n    ]);\n  }\n  // Priority 4: signature line (\"<Company> Talent Acquisition Team\", etc.) - catches\n  // emails like the Purolator example where the company only appears in the sign-off.\n  if (!company) {\n    company = extractCompanyFromSignature(combinedBody);\n  }\n  // Priority 5: \"From\" header display name, excluding known ATS/job-board senders.\n  if (!company && from) {\n    const fromMatch = from.match(/\"?([^\"<]+)\"?\\s*<.*>/);\n    if (fromMatch && fromMatch[1] && !NON_COMPANY_SENDER_KEYWORDS.test(fromMatch[1]) && !NON_COMPANY_SENDER_KEYWORDS.test(from)) {\n      company = fromMatch[1].trim();\n    }\n  }\n  company = company.replace(/[.,]$/, '').trim();\n\n  // Priority 3: individual fallback patterns for job title\n  if (!jobTitle) {\n    jobTitle = tryMatch(subject, [\n      /application for\\s+(?:the\\s+)?([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90}?)(?:\\s+(?:role|position|job))?\\s*(?:at|@|\\-|$)/i,\n      /applied for\\s+(?:the\\s+)?([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90}?)(?:\\s+(?:role|position|job))?\\s*(?:at|@|\\-|$)/i,\n      /for the\\s+([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90}?)\\s+(?:role|position)/i\n    ]);\n  }\n  if (!jobTitle) {\n    jobTitle = tryMatch(combinedBody, [\n      // \"apply for the X position\" / \"applying for the X position\" - handles titles with\n      // parenthetical qualifiers like \"AI Developer (Fixed term contract) position\"\n      /\\bapply(?:ing)? (?:for|to)\\s+(?:the\\s+)?([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90}?)\\s+position\\b/i,\n      /applying for\\s+(?:the\\s+)?([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90}?)(?:\\s+(?:role|position|job))?\\s*(?:at|@|\\n|\\.|,)/i,\n      /application for\\s+(?:the\\s+)?([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90}?)(?:\\s+(?:role|position|job))?\\s*(?:at|@|\\n|\\.|,)/i,\n      /position:\\s*([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90})/i,\n      /job title:\\s*([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90})/i,\n      /role:\\s*([A-Za-z0-9][\\w&.,\\/\\-\\+\\(\\) ]{1,90})/i\n    ]);\n  }\n  jobTitle = jobTitle.replace(/[.,]$/, '').trim();\n\n  // --- Date Applied: always formatted in APP_TIMEZONE, not UTC, to avoid a late-evening\n  // email rolling over to the next calendar day. ---\n  let dateApplied = '';\n  const dateHeader = d.date || '';\n  if (dateHeader) {\n    const parsed = new Date(dateHeader);\n    if (!isNaN(parsed.getTime())) {\n      dateApplied = toLocalDateString(parsed, APP_TIMEZONE);\n    }\n  }\n  if (!dateApplied) {\n    const dm = combinedBody.match(/applied on\\s+([A-Za-z]+\\s+\\d{1,2},?\\s+\\d{4})/i);\n    if (dm) {\n      const parsed = new Date(dm[1]);\n      if (!isNaN(parsed.getTime())) dateApplied = toLocalDateString(parsed, APP_TIMEZONE);\n    }\n  }\n  if (!dateApplied) {\n    dateApplied = toLocalDateString(new Date(), APP_TIMEZONE);\n  }\n\n  const jobLocation = tryMatch(combinedBody, [\n    /location:\\s*([A-Za-z0-9][\\w,.\\-\\/ ]{1,60})/i,\n    /based in\\s*([A-Za-z0-9][\\w,.\\-\\/ ]{1,60})/i,\n    /job location:\\s*([A-Za-z0-9][\\w,.\\-\\/ ]{1,60})/i,\n    /work location:\\s*([A-Za-z0-9][\\w,.\\-\\/ ]{1,60})/i,\n    /office location:\\s*([A-Za-z0-9][\\w,.\\-\\/ ]{1,60})/i\n  ]) || (/\\bremote\\b/i.test(combinedBody) ? 'Remote' : '');\n\n  const employmentType = tryMatch(combinedBody, [\n    /employment type:\\s*([A-Za-z\\-\\/ ]{1,30})/i,\n    /job type:\\s*([A-Za-z\\-\\/ ]{1,30})/i,\n    /\\b(full-time|part-time|fixed-term|fixed term contract|contract|contractor|internship|temporary|freelance|permanent|co-op)\\b/i\n  ]);\n\n  // Category used to populate the Google Sheet's \"Job Type\" dropdown column.\n  // Always resolves to one of: Software Developer, Data Analyst, IT Support,\n  // Internship, QA, Web Developer, Other.\n  const jobTypeCategory = categorizeJobType(jobTitle, combinedBody + ' ' + employmentType);\n\n  const recruiterEmail = tryMatch(searchable, [\n    /recruiter[^:]*:\\s*[\\w\\s]*<?([\\w.\\-]+@[\\w.\\-]+\\.\\w+)>?/i\n  ]);\n\n  const recruiterName = tryMatch(combinedBody, [\n    /recruiter:\\s*([A-Za-z][\\w'\\- ]{1,50})/i,\n    /your recruiter,?\\s*([A-Za-z][\\w'\\- ]{1,50})/i,\n    /hiring manager:\\s*([A-Za-z][\\w'\\- ]{1,50})/i\n  ]);\n\n  let jobUrl = '';\n  const rawHtmlOrBody = d.bodyHtml || combinedBody;\n  const urlMatch = rawHtmlOrBody.match(/https?:\\/\\/[^\\s\"'<>]+(?:job|posting|career|apply|position)[^\\s\"'<>]*/i)\n    || rawHtmlOrBody.match(/https?:\\/\\/[^\\s\"'<>]+/);\n  if (urlMatch) jobUrl = urlMatch[0];\n\n  const applicationId = tryMatch(searchable, [\n    /application\\s*(?:id|number|ref(?:erence)?)\\s*[:#]?\\s*([A-Za-z0-9\\-]{3,40})/i,\n    /reference\\s*(?:id|number)?\\s*[:#]?\\s*([A-Za-z0-9\\-]{3,40})/i,\n    /candidate\\s*id\\s*[:#]?\\s*([A-Za-z0-9\\-]{3,40})/i\n  ]);\n\n  results.push({\n    json: {\n      isJobApplication,\n      company: company || '',\n      jobTitle: jobTitle || '',\n      dateApplied: dateApplied || '',\n      source: source || '',\n      jobLocation: jobLocation || '',\n      employmentType: employmentType || '',\n      jobTypeCategory: jobTypeCategory || 'Other',\n      recruiterName: recruiterName || '',\n      recruiterEmail: recruiterEmail || '',\n      jobUrl: jobUrl || '',\n      applicationId: applicationId || '',\n      emailSubject: subject || '',\n      emailBody: combinedBody.substring(0, 2000)\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "87339c55-d008-4287-972e-824251f62eae",
+      "name": "Classify And Parse Application",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "is-job-application-cond",
+              "leftValue": "={{$json.isJobApplication}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b7b04f86-1c63-48dc-974d-1ccd63d5bc42",
+      "name": "Is Job Application?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -224,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "Date Applied",
+              "type": "string",
+              "value": "={{$json.dateApplied}}"
+            },
+            {
+              "id": "a2",
+              "name": "Company",
+              "type": "string",
+              "value": "={{$json.company}}"
+            },
+            {
+              "id": "a3",
+              "name": "Job Title",
+              "type": "string",
+              "value": "={{$json.jobTitle}}"
+            },
+            {
+              "id": "a4",
+              "name": "Job Type",
+              "type": "string",
+              "value": "={{$json.jobTypeCategory}}"
+            },
+            {
+              "id": "a5",
+              "name": "Location",
+              "type": "string",
+              "value": "={{$json.jobLocation}}"
+            },
+            {
+              "id": "a6",
+              "name": "Application Link",
+              "type": "string",
+              "value": "={{$json.jobUrl}}"
+            },
+            {
+              "id": "a7",
+              "name": "Resume Used",
+              "type": "string",
+              "value": ""
+            },
+            {
+              "id": "a8",
+              "name": "Cover Letter",
+              "type": "string",
+              "value": ""
+            },
+            {
+              "id": "a9",
+              "name": "Status",
+              "type": "string",
+              "value": "Applied"
+            },
+            {
+              "id": "a10",
+              "name": "Interview Date",
+              "type": "string",
+              "value": ""
+            },
+            {
+              "id": "a11",
+              "name": "Follow-Up Date",
+              "type": "string",
+              "value": ""
+            },
+            {
+              "id": "a12",
+              "name": "Salary Range",
+              "type": "string",
+              "value": ""
+            },
+            {
+              "id": "a13",
+              "name": "Contact Person",
+              "type": "string",
+              "value": "={{$json.recruiterName}}{{$json.recruiterEmail ? ' (' + $json.recruiterEmail + ')' : ''}}"
+            },
+            {
+              "id": "a14",
+              "name": "Notes",
+              "type": "string",
+              "value": "=Source: {{$json.source}} | Application ID: {{$json.applicationId}}"
+            },
+            {
+              "id": "a15",
+              "name": "Additional Notes",
+              "type": "string",
+              "value": "=Email Subject: {{$json.emailSubject}}\n\nEmail Body: {{$json.emailBody}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5ed196c5-32b6-49d9-948e-e811bb46dedd",
+      "name": "Map Fields to Sheet Row",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "mode": "id",
+          "value": "1NbXaDDS5U7RDH5Q6cHNTDIheZ1TsAJRaVDpX7ohKaBo"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Job Application Tracker"
+        },
+        "options": {}
+      },
+      "id": "319b3e6d-cf2c-4624-b460-931dd7bed51f",
+      "name": "Get All Applications",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        224,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const newRow = $('Map Fields to Sheet Row').first().json;\nconst existingRows = $input.all().map(i => i.json);\n\n// Strips punctuation and common corporate suffixes (Inc, LLC, Corp, etc.) so\n// \"Purolator Inc\" and \"Purolator\" (e.g. from an Indeed email vs. a direct company email\n// for the same job) are recognized as the same company instead of creating a duplicate row.\nconst normalizeCompany = (s) => {\n  let v = (s || '').toString().trim().toLowerCase();\n  v = v.replace(/[.,]/g, '');\n  v = v.replace(/\\s+(inc|incorporated|llc|ltd|corp|corporation|company|co|limited|plc|group)$/i, '');\n  return v.trim();\n};\n\nconst normalizeTitle = (s) => (s || '').toString().trim().toLowerCase().replace(/\\s+/g, ' ');\n\nconst isDuplicate = existingRows.some(row => {\n  const rowCompany = normalizeCompany(row['Company']);\n  const rowTitle = normalizeTitle(row['Job Title']);\n  return rowCompany !== '' && rowCompany === normalizeCompany(newRow['Company']) && rowTitle === normalizeTitle(newRow['Job Title']);\n});\n\nreturn [{\n  json: {\n    ...newRow,\n    isDuplicate\n  }\n}];"
+      },
+      "id": "0b53950a-1f18-43c7-9e52-b6179d7a46b9",
+      "name": "Check Duplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "not-duplicate-cond",
+              "leftValue": "={{$json.isDuplicate}}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "60503761-6927-41d6-990b-93d13d5996ae",
+      "name": "Skip If Duplicate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "mode": "id",
+          "value": "1NbXaDDS5U7RDH5Q6cHNTDIheZ1TsAJRaVDpX7ohKaBo"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Job Application Tracker"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date Applied": "={{$json[\"Date Applied\"]}}",
+            "Company": "={{$json[\"Company\"]}}",
+            "Job Title": "={{$json[\"Job Title\"]}}",
+            "Job Type": "={{$json[\"Job Type\"]}}",
+            "Location": "={{$json[\"Location\"]}}",
+            "Application Link": "={{$json[\"Application Link\"]}}",
+            "Resume Used": "={{$json[\"Resume Used\"]}}",
+            "Cover Letter": "={{$json[\"Cover Letter\"]}}",
+            "Status": "={{$json[\"Status\"]}}",
+            "Interview Date": "={{$json[\"Interview Date\"]}}",
+            "Follow-Up Date": "={{$json[\"Follow-Up Date\"]}}",
+            "Salary Range": "={{$json[\"Salary Range\"]}}",
+            "Contact Person": "={{$json[\"Contact Person\"]}}",
+            "Notes": "={{$json[\"Notes\"]}}",
+            "Additional Notes": "={{$json[\"Additional Notes\"]}}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Date Applied",
+              "displayName": "Date Applied",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Company",
+              "displayName": "Company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Job Title",
+              "displayName": "Job Title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Job Type",
+              "displayName": "Job Type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Location",
+              "displayName": "Location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Application Link",
+              "displayName": "Application Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Resume Used",
+              "displayName": "Resume Used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Cover Letter",
+              "displayName": "Cover Letter",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Interview Date",
+              "displayName": "Interview Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Follow-Up Date",
+              "displayName": "Follow-Up Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Salary Range",
+              "displayName": "Salary Range",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Contact Person",
+              "displayName": "Contact Person",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Additional Notes",
+              "displayName": "Additional Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "f28f686d-c882-4a90-8830-510b77460c4a",
+      "name": "Append New Application",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        880,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Email Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Email Content": {
+      "main": [
+        [
+          {
+            "node": "Classify And Parse Application",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify And Parse Application": {
+      "main": [
+        [
+          {
+            "node": "Is Job Application?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Job Application?": {
+      "main": [
+        [
+          {
+            "node": "Map Fields to Sheet Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Map Fields to Sheet Row": {
+      "main": [
+        [
+          {
+            "node": "Get All Applications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get All Applications": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicate": {
+      "main": [
+        [
+          {
+            "node": "Skip If Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip If Duplicate": {
+      "main": [
+        [
+          {
+            "node": "Append New Application",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "78d3e858-bdf3-4f6c-ad28-d33f7faa5804",
+  "meta": {
+    "instanceId": "a173c2480f7fdecbce02696fe1f5cd2b1e4f3c8737bfb957df88856dc7e9f8c2"
+  },
+  "nodeGroups": [],
+  "id": "4k4UjnraCKmaNgdr",
+  "tags": []
+}

@@ -1,0 +1,17 @@
+Subject: Application Received
+
+From: "Example Corp Careers" <careers@examplecorp.com>
+
+Dear Applicant,
+
+Thank you for taking the time to apply for the Software Engineer position. We are
+currently reviewing your candidate profile submission. A member of our talent
+acquisition team will contact you in the weeks ahead should your skills, knowledge and
+experience meet the requirements of the role.
+
+We thank all applicants for their interest, however only those selected for an
+interview will be contacted.
+
+Best regards,
+
+Example Corp Talent Acquisition Team

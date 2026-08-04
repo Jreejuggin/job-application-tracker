@@ -1,0 +1,24 @@
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      # Use 5679 during testing so it can run alongside your existing npm install on 5678.
+      # Change back to 5678:5678 once you've cut over and stopped the npm-based instance.
+      - "5679:5678"
+    environment:
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5679/}
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-America/Toronto}
+      - TZ=${GENERIC_TIMEZONE:-America/Toronto}
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data:
+    external: true
+    # Create this first with: docker volume create n8n_data
+    # so the data-copy step in the migration plan has somewhere to write to
+    # before docker compose up creates the container.

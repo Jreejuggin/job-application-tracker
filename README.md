@@ -23,24 +23,27 @@ the extraction logic handles the differences between them.
   info, Job URL, and Application ID using layered regex + fallback logic
 - Categorizes the role into a fixed set of dropdown values
 - Checks for duplicates before appending a new row to Google Sheets
+- **Tracks status automatically** — a later email about a job already in the sheet
+  (interview invite, assessment, offer, rejection, etc.) updates that row's Status
+  column instead of creating a duplicate entry, with a fixed set of dropdown values and a
+  safeguard against a stale email downgrading a status that's already further along
 
 ## Repo structure
 
 ```
 job-application-tracker/
 ├── README.md
+├── .gitignore
+├── docker-compose.yml             Docker Compose setup for self-hosted n8n
+├── .env.example                   copy to .env and fill in locally (never commit .env)
 ├── workflow/
-│   └── job_tracker.json          the n8n workflow, ready to import
+│   └── job_tracker.json           the n8n workflow, ready to import
 ├── docs/
-│   ├── architecture.md           node-by-node breakdown + flow diagram
-│   ├── setup.md                  full setup instructions
-│   └── screenshots/               (add your own n8n canvas screenshots here)
-├── sample-data/
-│   └── sample_application_email.txt
-├── CHANGELOG.md
-└── LICENSE
+│   ├── architecture.md            node-by-node breakdown + flow diagram
+│   ├── setup.md                   full setup instructions
+│   └── screenshots/
+│       └── workflow-canvas.png
+└── sample-data/
+    └── sample_application_email.txt
 ```
 
-## License
-
-MIT — see [`LICENSE`](LICENSE).
